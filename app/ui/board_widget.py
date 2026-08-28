@@ -190,34 +190,71 @@ class BoardWidget(QWidget):
 
         font = QFont("Microsoft YaHei", max(8, int(cell * 0.28)), QFont.Bold)
         p.setFont(font)
+        used = []
+        self._label_rects = []
         for t in top[:5]:
-            self._paint_winrate_label(p, t, cell)
+            used = self._paint_winrate_label(p, t, cell, used)
 
-    def _paint_winrate_label(self, p, t, cell):
+    def _winrate_color(self, wr):
+        """按胜率着色：0% 红 -> 50% 黄绿 -> 100% 绿。"""
+        wr = max(0.0, min(1.0, wr))
+        c = QColor()
+        c.setHsl(int(120.0 * wr), 200, 110)
+        return c
+
+    def _paint_winrate_label(self, p, t, cell, used):
         pt = self._point(t["row"], t["col"])
         text = f"{t['winrate'] * 100:.0f}%"
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(text)
         th = fm.height()
-        dx = cell * 0.55
-        dy = -th / 2 - cell * 0.1
-        rect = QRectF(pt.x() + dx, pt.y() + dy, tw + 8, th + 3)
+        bw, bh = tw + 8, th + 3
+
+        # 候选点上的同色小圆点，与标签颜色一一对应
+        wr = t.get("winrate", 0.5)
+        mark = self._winrate_color(wr)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(mark))
+        p.drawEllipse(pt, cell * 0.11, cell * 0.11)
+
+        # 标签默认放在点位右侧、垂直居中；贴右边缘时改放左侧
         x0, y0, _ = self._origin()
         right = x0 + (self.board_size - 1) * cell
+        dx = cell * 0.42
+        rect = QRectF(pt.x() + dx, pt.y() - bh / 2, bw, bh)
+        on_left = False
         if rect.right() > right:
             rect.moveLeft(pt.x() - dx - rect.width())
+            on_left = True
 
-        if self.grid and self.grid[t["row"]][t["col"]] == BLACK:
-            bg, fg = QColor(0, 0, 0, 180), QColor(255, 255, 255)
-        elif self.grid and self.grid[t["row"]][t["col"]] == WHITE:
-            bg, fg = QColor(255, 255, 255, 210), QColor(20, 20, 20)
-        else:
-            bg, fg = QColor(40, 40, 40, 175), QColor(255, 255, 255)
-        p.setPen(Qt.NoPen)
+        # 简单避让：与已放置的标签重叠时上下错开
+        shift, step, n = 0.0, bh + 2, 0
+        while n < 8:
+            if not any(rect.translated(0, shift).intersects(r) for r in used):
+                break
+            n += 1
+            sign = 1 if n % 2 == 1 else -1
+            shift = sign * ((n + 1) // 2) * step
+        rect = rect.translated(0, shift)
+        used.append(rect)
+        self._label_rects.append(rect)
+
+        # 连接线：从点位到标签边缘，建立明确的对应关系
+        p.setPen(QPen(mark, max(1.0, cell * 0.05)))
+        anchor = rect.right() if on_left else rect.left()
+        p.drawLine(QPointF(pt.x(), pt.y()),
+                   QPointF(anchor, rect.center().y()))
+
+        # 标签底色沿用胜率色（半透明），文字按亮度取黑/白
+        bg = QColor(mark)
+        bg.setAlpha(215)
+        fg = QColor(20, 20, 20) if mark.lightness() >= 150 else QColor(255, 255, 255)
+        p.setPen(QPen(mark.darker(125), max(1.0, cell * 0.03)))
         p.setBrush(QBrush(bg))
         p.drawRoundedRect(rect, 3, 3)
         p.setPen(fg)
         p.drawText(rect, Qt.AlignCenter, text)
+        return used
 
     def _paint_hover(self, p):
         if not self.clickable or self.hover is None or not self.grid:

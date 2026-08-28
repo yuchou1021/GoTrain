@@ -12,6 +12,7 @@ class InfoPanel(QWidget):
     undo_requested = Signal()
     pass_requested = Signal()
     resign_requested = Signal()
+    score_requested = Signal()
     export_sgf_requested = Signal()
     strength_changed = Signal(str)
 
@@ -27,6 +28,9 @@ class InfoPanel(QWidget):
         f.setBold(True)
         self.status_label.setFont(f)
         self.status_label.setMinimumHeight(64)
+
+        self.rules_label = QLabel("贴目：7.5 目（黑贴给白）")
+        self.rules_label.setStyleSheet("color:#666;")
 
         self.curve = WinrateCurveWidget()
 
@@ -59,8 +63,12 @@ class InfoPanel(QWidget):
         btn2.addWidget(self.btn_new_white)
         blay.addLayout(btn2)
 
+        btn3 = QHBoxLayout()
+        self.btn_score = QPushButton("申请点目")
         self.btn_export = QPushButton("导出 SGF…")
-        blay.addWidget(self.btn_export)
+        btn3.addWidget(self.btn_score)
+        btn3.addWidget(self.btn_export)
+        blay.addLayout(btn3)
 
         self.engine_label = QLabel("引擎：未启动")
         self.engine_label.setStyleSheet("color:#888;")
@@ -71,6 +79,7 @@ class InfoPanel(QWidget):
         line.setFrameShadow(QFrame.Sunken)
 
         lay.addWidget(self.status_label)
+        lay.addWidget(self.rules_label)
         lay.addWidget(line)
         lay.addWidget(self.curve, 1)
         lay.addWidget(box)
@@ -79,12 +88,16 @@ class InfoPanel(QWidget):
         self.btn_undo.clicked.connect(self.undo_requested.emit)
         self.btn_pass.clicked.connect(self.pass_requested.emit)
         self.btn_resign.clicked.connect(self.resign_requested.emit)
+        self.btn_score.clicked.connect(self.score_requested.emit)
         self.btn_new_black.clicked.connect(self.new_game_black.emit)
         self.btn_new_white.clicked.connect(self.new_game_white.emit)
         self.btn_export.clicked.connect(self.export_sgf_requested.emit)
 
     def set_status(self, text: str):
         self.status_label.setText(text)
+
+    def set_rules(self, text: str):
+        self.rules_label.setText(text)
 
     def set_engine(self, text: str):
         self.engine_label.setText(text)
@@ -95,5 +108,5 @@ class InfoPanel(QWidget):
             self.combo_strength.setCurrentIndex(idx)
 
     def set_buttons_enabled(self, ok: bool):
-        for b in (self.btn_undo, self.btn_pass, self.btn_resign, self.btn_export):
+        for b in (self.btn_undo, self.btn_pass, self.btn_resign, self.btn_score, self.btn_export):
             b.setEnabled(ok)

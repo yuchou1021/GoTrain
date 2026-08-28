@@ -7,9 +7,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, QObject, Signal, Slot, QTimer
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout,
-                               QMessageBox, QFileDialog)
+                               QMessageBox, QFileDialog, QInputDialog)
 
-from ..board.go_board import BLACK, WHITE, OPPONENT, COLOR_NAME, xy_to_gtp
+from ..board.go_board import EMPTY, BLACK, WHITE, OPPONENT, COLOR_NAME, xy_to_gtp
 from ..board.game import Game
 from ..engine.katago import KataGoEngine
 from ..engine.analysis import build_view
@@ -59,7 +59,7 @@ def resolve(p):
 class EngineWorker(QObject):
     """在后台线程里跑 KataGo，逐个处理分析请求。"""
 
-    result_ready = Signal(dict)
+    result_ready = Signal(dict, int)
     error = Signal(str)
     log = Signal(str)
 
@@ -68,6 +68,7 @@ class EngineWorker(QObject):
         self.queue = queue.Queue()
         self.engine = None
         self.settings = settings
+        self.latest_seq = 0
 
     def start_engine_and_run(self):
         try:
@@ -96,12 +97,17 @@ class EngineWorker(QObject):
             job = self.queue.get()
             if job is None:
                 break
+            seq = job.get("seq", 0)
+            if seq < self.latest_seq:
+                continue
             if self.engine is None:
                 self.error.emit("KataGo 引擎未运行")
                 continue
             try:
-                res = self.engine.analyze(**job)
-                self.result_ready.emit(res)
+                params = dict(job)
+                params.pop("seq", None)
+                res = self.engine.analyze(**params)
+                self.result_ready.emit(res, seq)
             except Exception as e:
                 self.error.emit(str(e))
 
@@ -119,6 +125,8 @@ class MainWindow(QMainWindow):
         self.current_strength = self.settings.get("ai_strength", "standard")
         self._ai_move_pending = False
         self._scoring = False
+        self._analysis_seq = 0
+        self.curve_data = {}
 
         self.worker = EngineWorker(self.settings)
         self.engine_thread = QThread(self)
@@ -155,12 +163,15 @@ class MainWindow(QMainWindow):
         sm.addAction("棋盘 9 路", lambda: self.set_board_size(9))
         sm.addAction("棋盘 13 路", lambda: self.set_board_size(13))
         sm.addAction("棋盘 19 路", lambda: self.set_board_size(19))
+        sm.addSeparator()
+        sm.addAction("贴目…", self.on_set_komi)
 
         self.panel.new_game_black.connect(lambda: self.new_game(BLACK))
         self.panel.new_game_white.connect(lambda: self.new_game(WHITE))
         self.panel.undo_requested.connect(self.on_undo)
         self.panel.pass_requested.connect(self.on_pass)
         self.panel.resign_requested.connect(self.on_resign)
+        self.panel.score_requested.connect(self.on_score_now)
         self.panel.export_sgf_requested.connect(self.on_export_sgf)
         self.panel.strength_changed.connect(self.on_strength_changed)
         self.board.move_clicked.connect(self.on_board_click)
@@ -178,6 +189,7 @@ class MainWindow(QMainWindow):
         self.board.set_analysis(None)
         self.board.set_clickable(True)
         self.panel.curve.clear()
+        self.curve_data = {}
         self.refresh()
         self.request_analysis()
 
@@ -185,6 +197,23 @@ class MainWindow(QMainWindow):
         self.settings["board_size"] = size
         self._save_settings()
         self.new_game(self.human_color)
+
+    def on_set_komi(self):
+        """修改黑方让给白方的贴目，立即生效并重新分析。"""
+        value, ok = QInputDialog.getDouble(
+            self, "贴目设置",
+            "黑方让给白方的贴目（目，0~15，步进 0.5）：",
+            float(self.settings.get("komi", 7.5)),
+            0.0, 15.0, 1, step=0.5)
+        if not ok:
+            return
+        self.settings["komi"] = value
+        self._save_settings()
+        if self.game is not None:
+            self.game.komi = value
+            self.refresh()
+            if not self.game.game_over:
+                self.request_analysis()
 
     def _save_settings(self):
         try:
@@ -212,6 +241,9 @@ class MainWindow(QMainWindow):
         self._ai_move_pending = False
         self._scoring = False
         self.board.set_analysis(None)
+        self.curve_data = {k: v for k, v in self.curve_data.items()
+                           if k <= self.game.move_number}
+        self.panel.curve.set_data(sorted(self.curve_data.items()))
         self.refresh()
         self.request_analysis()
 
@@ -236,6 +268,15 @@ class MainWindow(QMainWindow):
         text = self.game.resign(self.human_color)
         self._finish_game(text)
 
+    def on_score_now(self):
+        """主动申请点目（类似 OGS 请求终局 / Lizzie 评分）。"""
+        if self.game is None or self.game.game_over or self._scoring:
+            return
+        self._scoring = True
+        self.panel.set_status("正在申请点目…")
+        self.board.set_clickable(False)
+        self.request_analysis(force=True)
+
     def on_strength_changed(self, key):
         self.current_strength = key
         self.settings["ai_strength"] = key
@@ -246,26 +287,51 @@ class MainWindow(QMainWindow):
     # ---------- 分析与 AI ----------
     def after_move(self):
         self.refresh()
+        if self._maybe_end_by_fill():
+            return
         self.request_analysis()
+
+    def _maybe_end_by_fill(self):
+        """棋盘填满、双方都无点可下时自动终局。"""
+        if self.game is None or self.game.game_over or self._scoring:
+            return False
+        if all(v != EMPTY for row in self.game.board.grid for v in row):
+            self._scoring = True
+            self.panel.set_status("棋盘已满，正在申请点目…")
+            self.board.set_clickable(False)
+            self.request_analysis(force=True)
+            return True
+        return False
 
     def refresh(self):
         if self.game is None:
             return
         self.board.set_state(self.game.size, self.game.board.grid, self.game.last_move())
+        self.panel.set_rules(f"贴目：{self.game.komi:g} 目（黑贴给白）")
         if self.game.game_over:
             self.panel.set_buttons_enabled(False)
         else:
             self.panel.set_buttons_enabled(True)
-            me = "你" if self.game.turn == self.human_color else "AI"
-            self.panel.set_status(f"第 {self.game.move_number + 1} 手 · 轮到{COLOR_NAME[self.game.turn]}（{me}）")
+            if self.game.passes == 1:
+                if self.game.turn == self.human_color:
+                    self.panel.set_status("对方（AI）停了一手。你停一手即终局，也可继续落子")
+                else:
+                    self.panel.set_status("你停了一手。AI 停一手即终局")
+            else:
+                me = "你" if self.game.turn == self.human_color else "AI"
+                self.panel.set_status(f"第 {self.game.move_number + 1} 手 · 轮到{COLOR_NAME[self.game.turn]}（{me}）")
 
     def request_analysis(self, force=False):
         if self.game is None:
             return
         if self.game.game_over and not force:
             return
+        self._analysis_seq += 1
+        seq = self._analysis_seq
+        self.worker.latest_seq = seq
         visits = self.visits.get(self.current_strength, 600)
         self.worker.analyze_async({
+            "seq": seq,
             "moves": self.game.moves_for_engine(),
             "board_size": self.game.size,
             "komi": self.game.komi,
@@ -273,14 +339,19 @@ class MainWindow(QMainWindow):
             "timeout": 20.0,
         })
 
-    def on_analysis_result(self, result):
+    def on_analysis_result(self, result, seq):
+        if seq != self._analysis_seq:
+            return
         if self.game is None:
             return
-        view = build_view(result, self.game.size, self.game.turn)
+        view = build_view(result, self.game.size)
 
-        if self.game.game_over:
-            score_black = (result.get("rootInfo", {}) or {}).get("scoreLead")
-            if score_black is not None:
+        if self.game.game_over or self._scoring:
+            root = result.get("rootInfo", {}) or {}
+            score_lead = root.get("scoreLead")
+            if score_lead is not None:
+                current = root.get("currentPlayer", "B")
+                score_black = score_lead if current == "B" else -score_lead
                 text = self.game.set_score_result(score_black)
                 self._finish_game(text)
             return
@@ -289,7 +360,8 @@ class MainWindow(QMainWindow):
 
         wr = view["winrate"]
         wr_black = wr if self.game.turn == BLACK else 1.0 - wr
-        self.panel.curve.add_point(self.game.move_number, wr_black)
+        self.curve_data[self.game.move_number] = wr_black
+        self.panel.curve.set_data(sorted(self.curve_data.items()))
 
         status = (f"第 {self.game.move_number + 1} 手 · {COLOR_NAME[self.game.turn]}方胜率 "
                   f"{wr * 100:.0f}% · 领先 {view['score_lead']:+.1f} 目")
@@ -301,19 +373,21 @@ class MainWindow(QMainWindow):
         ai = OPPONENT[self.human_color]
         if self.game.turn == ai:
             if view["best"]:
-                self._schedule_ai_move(view["best"]["row"], view["best"]["col"])
+                self._schedule_ai_move(view["best"]["row"], view["best"]["col"], seq)
             else:
-                self.panel.set_status("AI 无合适落点（对局可能结束）")
+                self._schedule_ai_pass(seq)
 
-    def _schedule_ai_move(self, row, col):
+    def _schedule_ai_move(self, row, col, seq):
         if self._ai_move_pending:
             return
         self._ai_move_pending = True
         self.panel.set_status("AI 思考中…")
-        QTimer.singleShot(500, lambda: self._do_ai_move(row, col))
+        QTimer.singleShot(500, lambda: self._do_ai_move(row, col, seq))
 
-    def _do_ai_move(self, row, col):
+    def _do_ai_move(self, row, col, seq):
         self._ai_move_pending = False
+        if seq != self._analysis_seq:
+            return
         if self.game is None or self.game.game_over:
             return
         ok, err = self.game.play(row, col)
@@ -321,6 +395,31 @@ class MainWindow(QMainWindow):
             self.after_move()
         else:
             self.panel.set_status(f"AI 落子失败：{err}")
+
+    def _schedule_ai_pass(self, seq):
+        if self._ai_move_pending:
+            return
+        self._ai_move_pending = True
+        self.panel.set_status("AI 停一手…")
+        QTimer.singleShot(500, lambda: self._do_ai_pass(seq))
+
+    def _do_ai_pass(self, seq):
+        self._ai_move_pending = False
+        if seq != self._analysis_seq:
+            return
+        if self.game is None or self.game.game_over:
+            return
+        ok, err = self.game.pass_move()
+        if not ok:
+            self.panel.set_status(f"AI 停一手失败：{err}")
+            return
+        if self.game.game_over:
+            self._scoring = True
+            self.panel.set_status("对局结束，正在让 KataGo 评分…")
+            self.refresh()
+            self.request_analysis(force=True)
+        else:
+            self.after_move()
 
     def _finish_game(self, text):
         self._scoring = False

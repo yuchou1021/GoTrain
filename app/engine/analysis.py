@@ -1,14 +1,17 @@
-"""把 KataGo 分析结果转成界面视图（以当前行棋方视角）。"""
+"""把 KataGo 分析结果转成界面视图。
 
-from ..board.go_board import BLACK, WHITE, gtp_to_xy
+KataGo 的 rootInfo.winrate / rootInfo.scoreLead / moveInfos[].winrate
+都以"当前行棋方"（rootInfo.currentPlayer）为视角，这里直接透传，
+由调用方决定展示给谁。
+"""
+
+from ..board.go_board import gtp_to_xy
 
 
-def build_view(result: dict, board_size: int, perspective_color: int) -> dict:
+def build_view(result: dict, board_size: int) -> dict:
     root = result.get("rootInfo", {}) or {}
-    wr_black = root.get("winrate", 0.5)
-    wr = wr_black if perspective_color == BLACK else 1.0 - wr_black
-    score_black = root.get("scoreLead", 0.0) or 0.0
-    score = score_black if perspective_color == BLACK else -score_black
+    wr = root.get("winrate", 0.5)
+    score = root.get("scoreLead", 0.0) or 0.0
 
     top = []
     for mi in result.get("moveInfos", []) or []:
@@ -19,10 +22,8 @@ def build_view(result: dict, board_size: int, perspective_color: int) -> dict:
             row, col = gtp_to_xy(gtp, board_size)
         except Exception:
             continue
-        p = mi.get("winrate", 0.5)
-        if perspective_color == WHITE:
-            p = 1.0 - p
-        top.append({"row": row, "col": col, "winrate": p,
+        top.append({"row": row, "col": col,
+                    "winrate": mi.get("winrate", 0.5),
                     "visits": mi.get("visits", 0),
                     "score_lead": mi.get("scoreLead", 0.0)})
     top.sort(key=lambda t: -t["visits"])
