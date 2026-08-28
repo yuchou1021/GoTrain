@@ -1,0 +1,14 @@
+{
+  "katago_path": "engine_bin/katago.exe",
+  "model_path": "engine_bin/b18c384nbt-uec.bin.gz",
+  "config_path": "config/analysis.cfg",
+  "board_size": 19,
+  "komi": 7.5,
+  "human_color": "black",
+  "ai_strength": "standard",
+  "visits": {
+    "fast": 200,
+    "standard": 600,
+    "deep": 1600
+  }
+}
